@@ -37,13 +37,13 @@ export const en: Dict = {
   'common.daysShort': '{n}d',
   'common.untitled': 'Untitled',
 
-  'app.brand': 'Open Design',
-  'app.brandPill': 'Research Preview',
-  'app.brandSubtitle': 'by Nexu Labs',
+  'app.brand': 'OneShot Design',
+  'app.brandPill': 'Production Preview',
+  'app.brandSubtitle': 'one prompt, finished artifact',
   'app.welcomeLoading': 'Loading workspace…',
 
   'settings.welcomeKicker': 'Welcome',
-  'settings.welcomeTitle': 'Set up Open Design',
+  'settings.welcomeTitle': 'Set up OneShot Design',
   'settings.welcomeSubtitle':
     "Pick how you'd like to run generations. You can change this any time from the Settings button in the top bar.",
   'settings.kicker': 'Settings',
@@ -81,8 +81,6 @@ export const en: Dict = {
   'settings.localCli': 'Local CLI',
   'settings.anthropicApi': 'Anthropic API',
   'settings.noAgentSelected': 'no agent selected',
-  'settings.language': 'Language',
-  'settings.languageHint': 'Switch the interface language. Saved to this browser.',
   'settings.modelPicker': 'Model',
   'settings.reasoningPicker': 'Reasoning effort',
   'settings.modelPickerHint':
@@ -91,6 +89,7 @@ export const en: Dict = {
   'settings.modelCustomLabel': 'Custom model id',
   'settings.modelCustomPlaceholder': 'e.g. anthropic/claude-sonnet-4-6',
 
+  'entry.tabWorkflows': 'Workflows',
   'entry.tabDesigns': 'Designs',
   'entry.tabExamples': 'Examples',
   'entry.tabDesignSystems': 'Design systems',
