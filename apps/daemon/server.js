@@ -178,6 +178,11 @@ function sendMulterError(res, err) {
   return res.status(500).json({ code: 'UPLOAD_ERROR', error: 'upload failed' });
 }
 
+function formatListenHost(host) {
+  const displayHost = host === '0.0.0.0' || host === '::' ? 'localhost' : host;
+  return displayHost.includes(':') && !displayHost.startsWith('[') ? `[${displayHost}]` : displayHost;
+}
+
 export function createSseResponse(res, { keepAliveIntervalMs = SSE_KEEPALIVE_INTERVAL_MS } = {}) {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -228,7 +233,7 @@ export function createSseResponse(res, { keepAliveIntervalMs = SSE_KEEPALIVE_INT
   };
 }
 
-export async function startServer({ port = 7456, returnServer = false } = {}) {
+export async function startServer({ host = '127.0.0.1', port = 7456, returnServer = false } = {}) {
   const app = express();
   app.use(express.json({ limit: '4mb' }));
   const db = openDatabase(PROJECT_ROOT, { dataDir: RUNTIME_DATA_DIR });
@@ -1371,10 +1376,10 @@ export async function startServer({ port = 7456, returnServer = false } = {}) {
   }
 
   return new Promise((resolve) => {
-    const server = app.listen(port, '127.0.0.1', () => {
+    const server = app.listen(port, host, () => {
       const address = server.address();
       const actualPort = typeof address === 'object' && address ? address.port : port;
-      const url = `http://127.0.0.1:${actualPort}`;
+      const url = `http://${formatListenHost(host)}:${actualPort}`;
       resolve(returnServer ? { url, server } : url);
     });
   });
