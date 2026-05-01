@@ -118,6 +118,8 @@ export function ProjectView({
   const [openRequest, setOpenRequest] = useState<{ name: string; nonce: number } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const cancelRef = useRef<AbortController | null>(null);
+  const sendTextBufferCancelRef = useRef<(() => void) | null>(null);
+  const reattachTextBufferCancelsRef = useRef<Set<() => void>>(new Set());
   const reattachControllersRef = useRef<Map<string, AbortController>>(new Map());
   const reattachCancelControllersRef = useRef<Map<string, AbortController>>(new Map());
   const completedReattachRunsRef = useRef<Set<string>>(new Set());
@@ -186,6 +188,10 @@ export function ProjectView({
 
   useEffect(() => {
     return () => {
+      sendTextBufferCancelRef.current?.();
+      sendTextBufferCancelRef.current = null;
+      for (const cancel of reattachTextBufferCancelsRef.current) cancel();
+      reattachTextBufferCancelsRef.current.clear();
       for (const controller of reattachControllersRef.current.values()) {
         controller.abort();
       }
@@ -196,6 +202,16 @@ export function ProjectView({
       reattachCancelControllersRef.current.clear();
     };
   }, [project.id, activeConversationId]);
+
+  const cancelSendTextBuffer = useCallback(() => {
+    sendTextBufferCancelRef.current?.();
+    sendTextBufferCancelRef.current = null;
+  }, []);
+
+  const cancelReattachTextBuffers = useCallback(() => {
+    for (const cancel of reattachTextBufferCancelsRef.current) cancel();
+    reattachTextBufferCancelsRef.current.clear();
+  }, []);
 
   // Hydrate the open-tabs state once per project. After this initial
   // load, every mutation flows through saveTabsState() which keeps DB +
@@ -465,7 +481,16 @@ export function ProjectView({
             clearTimeout(persistTimer);
             persistTimer = null;
           }
+          textBuffer.flush();
           persistMessageById(message.id);
+        };
+        const textBuffer = createBufferedTextUpdates({
+          updateMessage: (updater) => updateMessageById(message.id, updater),
+          persistSoon,
+        });
+        reattachTextBufferCancelsRef.current.add(textBuffer.cancel);
+        const unregisterTextBuffer = () => {
+          reattachTextBufferCancelsRef.current.delete(textBuffer.cancel);
         };
 
         void reattachDaemonRun({
@@ -475,14 +500,15 @@ export function ProjectView({
           initialLastEventId: message.lastRunEventId ?? null,
           handlers: {
             onDelta: (delta) => {
-              updateMessageById(message.id, (prev) => ({ ...prev, content: prev.content + delta }));
-              persistSoon();
+              textBuffer.appendContent(delta);
             },
             onAgentEvent: (ev) => {
-              updateMessageById(message.id, (prev) => ({ ...prev, events: [...(prev.events ?? []), ev] }));
-              persistSoon();
+              textBuffer.appendEvent(ev);
             },
             onDone: () => {
+              textBuffer.flush();
+              textBuffer.cancel();
+              unregisterTextBuffer();
               updateMessageById(
                 message.id,
                 (prev) => ({ ...prev, runStatus: 'succeeded', endedAt: prev.endedAt ?? Date.now() }),
@@ -499,6 +525,9 @@ export function ProjectView({
               onProjectsRefresh();
             },
             onError: (err) => {
+              textBuffer.flush();
+              textBuffer.cancel();
+              unregisterTextBuffer();
               setError(err.message);
               updateMessageById(
                 message.id,
@@ -515,6 +544,7 @@ export function ProjectView({
             },
           },
           onRunStatus: (runStatus) => {
+            textBuffer.flush();
             updateMessageById(
               message.id,
               (prev) => ({
@@ -525,6 +555,8 @@ export function ProjectView({
               true,
             );
             if (runStatus === 'canceled') {
+              textBuffer.cancel();
+              unregisterTextBuffer();
               completedReattachRunsRef.current.add(runId);
               reattachControllersRef.current.delete(runId);
               reattachCancelControllersRef.current.delete(runId);
@@ -535,6 +567,7 @@ export function ProjectView({
             }
           },
           onRunEventId: (lastRunEventId) => {
+            textBuffer.flush();
             updateMessageById(message.id, (prev) => ({ ...prev, lastRunEventId }));
             persistSoon();
           },
@@ -545,6 +578,9 @@ export function ProjectView({
             }
           })
           .finally(() => {
+            textBuffer.flush();
+            textBuffer.cancel();
+            unregisterTextBuffer();
             if (persistTimer) clearTimeout(persistTimer);
             reattachControllersRef.current.delete(runId);
             reattachCancelControllersRef.current.delete(runId);
@@ -557,6 +593,7 @@ export function ProjectView({
     void attachRecoverableRuns();
     return () => {
       cancelled = true;
+      cancelReattachTextBuffers();
     };
   }, [
     daemonLive,
@@ -568,6 +605,7 @@ export function ProjectView({
     persistMessageById,
     refreshProjectFiles,
     onProjectsRefresh,
+    cancelReattachTextBuffers,
   ]);
 
   const handleSend = useCallback(
@@ -647,6 +685,7 @@ export function ProjectView({
         }, 500);
       };
       const pushEvent = (ev: AgentEvent) => {
+        textBuffer.flush();
         updateAssistant((prev) => ({ ...prev, events: [...(prev.events ?? []), ev] }));
         persistAssistantSoon();
         // Track Write tool invocations so we can auto-open the destination
@@ -675,9 +714,7 @@ export function ProjectView({
         }
       };
 
-      const appendContent = (delta: string) => {
-        updateAssistant((prev) => ({ ...prev, content: prev.content + delta }));
-        persistAssistantSoon();
+      const applyContentDelta = (delta: string) => {
         for (const ev of parser.feed(delta)) {
           if (ev.type === 'artifact:start') {
             liveHtml = '';
@@ -695,14 +732,27 @@ export function ProjectView({
         }
       };
 
+      const textBuffer = createBufferedTextUpdates({
+        updateMessage: updateAssistant,
+        persistSoon: persistAssistantSoon,
+        onContentDelta: applyContentDelta,
+      });
+      sendTextBufferCancelRef.current = textBuffer.cancel;
+
       const controller = new AbortController();
       const cancelController = new AbortController();
       abortRef.current = controller;
       cancelRef.current = cancelController;
       const handlers = {
-        onDelta: appendContent,
-        onAgentEvent: pushEvent,
+        onDelta: textBuffer.appendContent,
+        onAgentEvent: (ev: AgentEvent) => {
+          if (ev.kind === 'text') textBuffer.appendTextEvent(ev.text);
+          else pushEvent(ev);
+        },
         onDone: () => {
+          textBuffer.flush();
+          textBuffer.cancel();
+          cancelSendTextBuffer();
           for (const ev of parser.flush()) {
             if (ev.type === 'artifact:end') {
               setArtifact((prev) => (prev ? { ...prev, html: ev.fullContent } : null));
@@ -745,6 +795,9 @@ export function ProjectView({
           onProjectsRefresh();
         },
         onError: (err: Error) => {
+          textBuffer.flush();
+          textBuffer.cancel();
+          cancelSendTextBuffer();
           setError(err.message);
           updateAssistant((prev) => ({
             ...prev,
@@ -920,6 +973,8 @@ export function ProjectView({
 
   const handleStop = useCallback(() => {
     const stoppedAt = Date.now();
+    cancelSendTextBuffer();
+    cancelReattachTextBuffers();
     cancelRef.current?.abort();
     cancelRef.current = null;
     for (const controller of reattachCancelControllersRef.current.values()) {
@@ -952,7 +1007,7 @@ export function ProjectView({
       for (const message of finalized) persistMessage(message);
       return next;
     });
-  }, [persistMessage]);
+  }, [cancelSendTextBuffer, cancelReattachTextBuffers, persistMessage]);
 
   const handleNewConversation = useCallback(async () => {
     const fresh = await createConversation(project.id);
@@ -1142,4 +1197,127 @@ function isTerminalRunStatus(status: ChatMessage['runStatus']): boolean {
 
 function isActiveRunStatus(status: ChatMessage['runStatus']): boolean {
   return status === 'queued' || status === 'running';
+}
+
+function createBufferedTextUpdates({
+  updateMessage,
+  persistSoon,
+  onContentDelta,
+}: {
+  updateMessage: (updater: (prev: ChatMessage) => ChatMessage) => void;
+  persistSoon: () => void;
+  onContentDelta?: (delta: string) => void;
+}) {
+  let pendingContentDelta = '';
+  let pendingTextEventDelta = '';
+  let flushFrame: number | null = null;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+  let flushing = false;
+  let needsFlush = false;
+  const hasDocument = typeof document !== 'undefined';
+
+  const cancelScheduledFlush = () => {
+    if (flushFrame !== null) {
+      cancelAnimationFrame(flushFrame);
+      flushFrame = null;
+    }
+    if (flushTimer !== null) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+  };
+
+  const flush = () => {
+    if (disposed) return;
+    if (flushing) {
+      needsFlush = true;
+      return;
+    }
+    cancelScheduledFlush();
+    if (!pendingContentDelta && !pendingTextEventDelta && !needsFlush) return;
+    flushing = true;
+    needsFlush = false;
+    const contentDelta = pendingContentDelta;
+    const textEventDelta = pendingTextEventDelta;
+    pendingContentDelta = '';
+    pendingTextEventDelta = '';
+    try {
+      updateMessage((prev) => ({
+        ...prev,
+        content: prev.content + contentDelta,
+        events: textEventDelta
+          ? [...(prev.events ?? []), { kind: 'text', text: textEventDelta }]
+          : prev.events,
+      }));
+      persistSoon();
+      if (contentDelta) onContentDelta?.(contentDelta);
+    } finally {
+      flushing = false;
+    }
+    if (pendingContentDelta || pendingTextEventDelta || needsFlush) {
+      needsFlush = false;
+      scheduleFlush();
+    }
+  };
+
+  const scheduleFlush = () => {
+    if (disposed || flushFrame !== null || flushTimer !== null) return;
+    flushFrame = requestAnimationFrame(() => {
+      flushFrame = null;
+      flush();
+    });
+    flushTimer = setTimeout(() => {
+      flushTimer = null;
+      flush();
+    }, 250);
+  };
+
+  const appendContent = (delta: string) => {
+    if (disposed) return;
+    pendingContentDelta += delta;
+    needsFlush = true;
+    scheduleFlush();
+  };
+
+  const appendTextEvent = (delta: string) => {
+    if (disposed) return;
+    pendingTextEventDelta += delta;
+    needsFlush = true;
+    scheduleFlush();
+  };
+
+  const appendEvent = (ev: AgentEvent) => {
+    if (disposed) return;
+    if (ev.kind === 'text') {
+      appendTextEvent(ev.text);
+      return;
+    }
+    flush();
+    updateMessage((prev) => ({ ...prev, events: [...(prev.events ?? []), ev] }));
+    persistSoon();
+  };
+
+  const cancel = () => {
+    disposed = true;
+    cancelScheduledFlush();
+    pendingContentDelta = '';
+    pendingTextEventDelta = '';
+    needsFlush = false;
+    if (hasDocument) {
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    }
+  };
+
+  function onVisibilityChange() {
+    if (document.visibilityState === 'hidden') {
+      flush();
+    }
+  }
+
+  if (hasDocument) {
+    document.addEventListener('visibilitychange', onVisibilityChange);
+  }
+
+  return { appendContent, appendTextEvent, appendEvent, flush, cancel };
 }
