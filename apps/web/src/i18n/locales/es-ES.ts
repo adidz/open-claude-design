@@ -649,4 +649,7 @@ export const esES: Dict = {
   'sketch.clear': 'Limpiar',
   'sketch.close': 'Cerrar',
   'sketch.textPrompt': 'Texto:',
+  'fileViewer.reactMeta': 'React Meta',
+  'fileViewer.exportJsx': 'JSX exportieren',
+  'fileViewer.exportReactHtml': 'React HTML exportieren',
 };
