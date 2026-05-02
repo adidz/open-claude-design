@@ -652,4 +652,7 @@ export const fa: Dict = {
   'sketch.clear': 'پاک کردن',
   'sketch.close': 'بستن',
   'sketch.textPrompt': 'متن:',
+  'fileViewer.reactMeta': 'React Meta',
+  'fileViewer.exportJsx': 'JSX exportieren',
+  'fileViewer.exportReactHtml': 'React HTML exportieren',
 };
