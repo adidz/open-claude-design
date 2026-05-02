@@ -650,4 +650,7 @@ export const ptBR: Dict = {
   'sketch.clear': 'Limpar',
   'sketch.close': 'Fechar',
   'sketch.textPrompt': 'Texto:',
+  'fileViewer.reactMeta': 'React Meta',
+  'fileViewer.exportJsx': 'JSX exportieren',
+  'fileViewer.exportReactHtml': 'React HTML exportieren',
 };
