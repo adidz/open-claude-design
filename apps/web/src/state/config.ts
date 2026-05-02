@@ -1,12 +1,20 @@
-import type { AppConfig, MediaProviderCredentials } from '../types';
+import { isOpenAICompatible } from '../providers/openai-compatible';
+import type { ApiProtocol, AppConfig, MediaProviderCredentials } from '../types';
 
 const STORAGE_KEY = 'open-design:config';
+const CONFIG_MIGRATION_VERSION = 1;
 
 export const DEFAULT_CONFIG: AppConfig = {
   mode: 'daemon',
   apiKey: '',
   baseUrl: 'https://api.anthropic.com',
   model: 'claude-sonnet-4-5',
+  // New configs should be explicit. loadConfig() still detects parsed legacy
+  // saved configs that did not have this field and migrates those from their
+  // saved baseUrl/model before applying the current migration version.
+  apiProtocol: 'anthropic',
+  configMigrationVersion: CONFIG_MIGRATION_VERSION,
+  apiProviderBaseUrl: 'https://api.anthropic.com',
   agentId: null,
   skillId: null,
   designSystemId: null,
@@ -16,23 +24,137 @@ export const DEFAULT_CONFIG: AppConfig = {
 };
 
 /** Well-known providers with pre-filled base URLs. */
-export const KNOWN_PROVIDERS: Array<{ label: string; baseUrl: string; model: string }> = [
-  { label: 'Anthropic (Claude)', baseUrl: 'https://api.anthropic.com', model: 'claude-sonnet-4-5' },
-  { label: 'MiMo (Xiaomi) — OpenAI', baseUrl: 'https://token-plan-cn.xiaomimimo.com/v1', model: 'mimo-v2.5-pro' },
-  { label: 'MiMo (Xiaomi) — Anthropic', baseUrl: 'https://token-plan-cn.xiaomimimo.com/anthropic', model: 'mimo-v2.5-pro' },
+export interface KnownProvider {
+  label: string;
+  protocol: ApiProtocol;
+  baseUrl: string;
+  /** Default model to apply when the provider is selected. */
+  model: string;
+  /** Optional provider-specific model choices shown in Settings. */
+  models?: string[];
+}
+
+// Some providers appear more than once because they expose both
+// Anthropic-compatible (/v1/messages) and OpenAI-compatible
+// (/v1/chat/completions) gateways. Keep those entries separate so the Settings
+// UI can scope quick-fill presets and model suggestions to the selected
+// protocol.
+//
+// Model lists are hand-curated from provider docs/current public presets rather
+// than fetched dynamically. To add a provider, include a user-facing label, the
+// protocol that determines request routing, the base URL, a default model, and
+// optional provider-specific model choices.
+export const KNOWN_PROVIDERS: KnownProvider[] = [
+  {
+    label: 'Anthropic (Claude)',
+    protocol: 'anthropic',
+    baseUrl: 'https://api.anthropic.com',
+    model: 'claude-sonnet-4-5',
+    models: ['claude-sonnet-4-5', 'claude-opus-4-5', 'claude-haiku-4-5'],
+  },
+  {
+    label: 'DeepSeek — Anthropic',
+    protocol: 'anthropic',
+    baseUrl: 'https://api.deepseek.com/anthropic',
+    model: 'deepseek-chat',
+    models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash', 'deepseek-v4-pro'],
+  },
+  {
+    label: 'MiniMax — Anthropic',
+    protocol: 'anthropic',
+    baseUrl: 'https://api.minimaxi.com/anthropic',
+    model: 'MiniMax-M2.7-highspeed',
+    models: [
+      'MiniMax-M2.7-highspeed',
+      'MiniMax-M2.7',
+      'MiniMax-M2.5-highspeed',
+      'MiniMax-M2.5',
+      'MiniMax-M2.1-highspeed',
+      'MiniMax-M2.1',
+      'MiniMax-M2',
+    ],
+  },
+  {
+    label: 'OpenAI',
+    protocol: 'openai',
+    baseUrl: 'https://api.openai.com/v1',
+    model: 'gpt-4o',
+    models: ['gpt-4o', 'gpt-4o-mini', 'o3', 'o4-mini'],
+  },
+  {
+    label: 'DeepSeek — OpenAI',
+    protocol: 'openai',
+    baseUrl: 'https://api.deepseek.com',
+    model: 'deepseek-chat',
+    models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash', 'deepseek-v4-pro'],
+  },
+  {
+    label: 'MiniMax — OpenAI',
+    protocol: 'openai',
+    baseUrl: 'https://api.minimaxi.com/v1',
+    model: 'MiniMax-M2.7-highspeed',
+    models: [
+      'MiniMax-M2.7-highspeed',
+      'MiniMax-M2.7',
+      'MiniMax-M2.5-highspeed',
+      'MiniMax-M2.5',
+      'MiniMax-M2.1-highspeed',
+      'MiniMax-M2.1',
+      'MiniMax-M2',
+    ],
+  },
+  {
+    label: 'MiMo (Xiaomi) — OpenAI',
+    protocol: 'openai',
+    baseUrl: 'https://token-plan-cn.xiaomimimo.com/v1',
+    model: 'mimo-v2.5-pro',
+    models: ['mimo-v2.5-pro'],
+  },
+  {
+    label: 'MiMo (Xiaomi) — Anthropic',
+    protocol: 'anthropic',
+    baseUrl: 'https://token-plan-cn.xiaomimimo.com/anthropic',
+    model: 'mimo-v2.5-pro',
+    models: ['mimo-v2.5-pro'],
+  },
 ];
+
+function inferApiProtocol(model: string, baseUrl: string): ApiProtocol {
+  try {
+    return isOpenAICompatible(model, baseUrl) ? 'openai' : 'anthropic';
+  } catch {
+    // Preserve the rest of the user's settings even if an old saved base URL is
+    // malformed enough for URL parsing to throw. Anthropic is the safest default
+    // because it matches the original built-in provider.
+    return 'anthropic';
+  }
+}
 
 export function loadConfig(): AppConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULT_CONFIG };
     const parsed = JSON.parse(raw) as Partial<AppConfig>;
-    return {
+    const parsedHasApiProtocol = Object.prototype.hasOwnProperty.call(parsed, 'apiProtocol');
+    const merged: AppConfig = {
       ...DEFAULT_CONFIG,
       ...parsed,
       mediaProviders: { ...(parsed.mediaProviders ?? {}) },
       agentModels: { ...(parsed.agentModels ?? {}) },
     };
+
+    if (parsed.configMigrationVersion !== CONFIG_MIGRATION_VERSION) {
+      // Migration v1: configs saved before apiProtocol existed need an explicit
+      // protocol so old OpenAI-compatible endpoints keep routing correctly.
+      // This is version-gated instead of only field-gated so a later imported
+      // legacy config can be migrated when it is loaded.
+      if (!parsedHasApiProtocol && merged.mode === 'api') {
+        merged.apiProtocol = inferApiProtocol(merged.model, merged.baseUrl);
+      }
+      merged.configMigrationVersion = CONFIG_MIGRATION_VERSION;
+    }
+
+    return merged;
   } catch {
     return { ...DEFAULT_CONFIG };
   }
