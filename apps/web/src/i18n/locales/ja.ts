@@ -647,4 +647,7 @@ export const ja: Dict = {
   'sketch.clear': 'クリア',
   'sketch.close': '閉じる',
   'sketch.textPrompt': 'テキスト:',
+  'fileViewer.reactMeta': 'React Meta',
+  'fileViewer.exportJsx': 'JSX exportieren',
+  'fileViewer.exportReactHtml': 'React HTML exportieren',
 };
