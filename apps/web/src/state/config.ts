@@ -2,15 +2,19 @@ import { isOpenAICompatible } from '../providers/openai-compatible';
 import type { ApiProtocol, AppConfig, MediaProviderCredentials } from '../types';
 
 const STORAGE_KEY = 'open-design:config';
+const CONFIG_MIGRATION_VERSION = 1;
 
 export const DEFAULT_CONFIG: AppConfig = {
   mode: 'daemon',
   apiKey: '',
   baseUrl: 'https://api.anthropic.com',
   model: 'claude-sonnet-4-5',
-  // Keep apiProtocol unset in defaults so loadConfig() does not backfill it
-  // into legacy saved configs. streamMessage() uses the legacy provider
-  // heuristic whenever apiProtocol is absent.
+  // New configs should be explicit. loadConfig() still detects parsed legacy
+  // saved configs that did not have this field and migrates those from their
+  // saved baseUrl/model before applying the current migration version.
+  apiProtocol: 'anthropic',
+  configMigrationVersion: CONFIG_MIGRATION_VERSION,
+  apiProviderBaseUrl: 'https://api.anthropic.com',
   agentId: null,
   skillId: null,
   designSystemId: null,
@@ -30,6 +34,16 @@ export interface KnownProvider {
   models?: string[];
 }
 
+// Some providers appear more than once because they expose both
+// Anthropic-compatible (/v1/messages) and OpenAI-compatible
+// (/v1/chat/completions) gateways. Keep those entries separate so the Settings
+// UI can scope quick-fill presets and model suggestions to the selected
+// protocol.
+//
+// Model lists are hand-curated from provider docs/current public presets rather
+// than fetched dynamically. To add a provider, include a user-facing label, the
+// protocol that determines request routing, the base URL, a default model, and
+// optional provider-specific model choices.
 export const KNOWN_PROVIDERS: KnownProvider[] = [
   {
     label: 'Anthropic (Claude)',
@@ -105,11 +119,23 @@ export const KNOWN_PROVIDERS: KnownProvider[] = [
   },
 ];
 
+function inferApiProtocol(model: string, baseUrl: string): ApiProtocol {
+  try {
+    return isOpenAICompatible(model, baseUrl) ? 'openai' : 'anthropic';
+  } catch {
+    // Preserve the rest of the user's settings even if an old saved base URL is
+    // malformed enough for URL parsing to throw. Anthropic is the safest default
+    // because it matches the original built-in provider.
+    return 'anthropic';
+  }
+}
+
 export function loadConfig(): AppConfig {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return { ...DEFAULT_CONFIG };
     const parsed = JSON.parse(raw) as Partial<AppConfig>;
+    const parsedHasApiProtocol = Object.prototype.hasOwnProperty.call(parsed, 'apiProtocol');
     const merged: AppConfig = {
       ...DEFAULT_CONFIG,
       ...parsed,
@@ -117,11 +143,15 @@ export function loadConfig(): AppConfig {
       agentModels: { ...(parsed.agentModels ?? {}) },
     };
 
-    // One-time migration for configs saved before apiProtocol existed: make
-    // the inferred protocol explicit so old OpenAI-compatible endpoints keep
-    // routing correctly after the Settings UI splits protocol tabs.
-    if (!merged.apiProtocol && merged.mode === 'api') {
-      merged.apiProtocol = isOpenAICompatible(merged.model, merged.baseUrl) ? 'openai' : 'anthropic';
+    if (parsed.configMigrationVersion !== CONFIG_MIGRATION_VERSION) {
+      // Migration v1: configs saved before apiProtocol existed need an explicit
+      // protocol so old OpenAI-compatible endpoints keep routing correctly.
+      // This is version-gated instead of only field-gated so a later imported
+      // legacy config can be migrated when it is loaded.
+      if (!parsedHasApiProtocol && merged.mode === 'api') {
+        merged.apiProtocol = inferApiProtocol(merged.model, merged.baseUrl);
+      }
+      merged.configMigrationVersion = CONFIG_MIGRATION_VERSION;
     }
 
     return merged;
